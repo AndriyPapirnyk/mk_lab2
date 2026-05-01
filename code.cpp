@@ -1,10 +1,20 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
+#define DEBUG_MODE 1
+
+#ifdef DEBUG_MODE
+  #define DEBUG_PRINT(x) Serial.print(x)
+  #define DEBUG_PRINTLN(x) Serial.println(x)
+#else
+  #define DEBUG_PRINT(x)
+  #define DEBUG_PRINTLN(x)
+#endif
+
 const int ledPins[] = {2, 4, 5};
 const int numLeds = 3;
 const int buttonPin = 19;
-const int buttonPartnerPin = 22;
+const int buttonPartnerPin = 22; 
 
 const char* ap_ssid = "ESP32_Lab1_WROOM";
 const char* ap_password = "12345678";
@@ -22,22 +32,22 @@ unsigned long buttonPressTime = 0;
 bool isHolding = false;
 const int holdThreshold = 1000;         
 
-volatile bool buttonPartnerFlag = false;
+volatile bool partnerButtonFlag = false;
 volatile unsigned long lastPartnerIsrTime = 0;
 
 void IRAM_ATTR buttonISR() {
   unsigned long interruptTime = millis();
-  if (interruptTime - lastIsrTime > 50) {
+  if (interruptTime - lastIsrTime > 300) { 
     isrButtonState = digitalRead(buttonPin);
     buttonFlag = true;
     lastIsrTime = interruptTime;
   }
 }
 
-void IRAM_ATTR buttonPartnerISR() {
+void IRAM_ATTR partnerButtonISR() {
   unsigned long interruptTime = millis();
-  if (interruptTime - lastPartnerIsrTime > 50) {
-    buttonPartnerFlag = true;
+  if (interruptTime - lastPartnerIsrTime > 300) {
+    partnerButtonFlag = true;
     lastPartnerIsrTime = interruptTime;
   }
 }
@@ -48,42 +58,21 @@ const char* htmlPage = R"rawliteral(
 <head>
   <meta charset="UTF-8">
   <title>Lab1</title>
-  <style>
-    body { font-family: Arial; text-align: center; margin:0px auto; padding-top: 30px;}
-    button { padding: 15px 30px; font-size: 18px; margin: 10px; cursor: pointer; border-radius: 5px; border: none; background-color: #2f4468; color: white;}
-    .led { width: 50px; height: 50px; display: inline-block; margin: 10px; border: 2px solid #333; background-color: #ddd; border-radius: 5px; }
-    .led.red.on { background-color: red; }
-    .led.orange.on { background-color: orange; }
-    .led.green.on { background-color: #00ff00; }
-  </style>
   <script>
     setInterval(function() {
       fetch('/state')
         .then(response => response.text())
         .then(data => {
-          let parts = data.split(',');
-          document.getElementById('status').innerText = parts[1] === '1' ? 'Pause' : 'Working';
-          let idx = parseInt(parts[0]);
-          let paused = parts[1] === '1';
-          document.getElementById('led0').className = 'led red ' + (idx === 0 && !paused ? 'on' : '');
-          document.getElementById('led1').className = 'led orange ' + (idx === 1 && !paused ? 'on' : '');
-          document.getElementById('led2').className = 'led green ' + (idx === 2 && !paused ? 'on' : '');
+          document.getElementById('status').innerText = data;
         });
-    }, 300);
-    function toggleOwn() { fetch('/toggle'); }
-    function sendPartner() { fetch('/send'); }
+    }, 500);
   </script>
 </head>
 <body>
-  <h1>lab1: alg 8 Papirnyk Andriy</h1>
-  <div>
-    <div id="led0" class="led red"></div>
-    <div id="led1" class="led orange"></div>
-    <div id="led2" class="led green"></div>
-  </div>
-  <p>Alg state: <b id="status">%STATE%</b></p>
-  <button onclick="toggleOwn()">Switch my alg</button>
-  <button onclick="sendPartner()" style="background-color: #a83232;">Switch partner alg</button>
+<h1>lab1: alg 8 Papirnyk Andriy</h1>
+<p>Alg state: <b id="status">%STATE%</b></p>
+<button onclick="location.href='/toggle'">Switch alg</button>
+<button onclick="fetch('/send')" style="background-color: #a83232; color: white;">Kick Partner</button>
 </body>
 </html>
 )rawliteral";
@@ -96,17 +85,21 @@ void handleRoot() {
 
 void handleToggle() {
   isPaused = !isPaused;
-  server.send(200, "text/plain", "ok");
+  server.sendHeader("Location", "/");
+  server.send(303);
 }
 
 void handleSend() {
-  Serial.print("B"); 
+  partnerButtonFlag = true;
   server.send(200, "text/plain", "ok");
 }
 
 void handleGetState() {
-  String state = String(currentLed) + "," + String(isPaused ? 1 : 0);
-  server.send(200, "text/plain", state);
+  server.send(200, "text/plain", isPaused ? "Pause" : "Working");
+}
+
+void handleWebClient() {
+  server.handleClient(); 
 }
 
 void processButtonLogic() {
@@ -125,9 +118,11 @@ void processButtonLogic() {
     if (millis() - buttonPressTime >= holdThreshold) {
       isPaused = !isPaused;
       isHolding = true; 
+      DEBUG_PRINTLN(isPaused ? "\nAlgoritm stopped" : "\nAlgoritm resumed");
     }
   }
 }
+
 void executeLedAlgorithm() {
   if (!isPaused) {
     if (millis() - lastBlinkTime >= blinkInterval) {
@@ -140,45 +135,70 @@ void executeLedAlgorithm() {
   }
 }
 
+void handlePartnerButton() {
+  if (partnerButtonFlag) {
+    partnerButtonFlag = false;
+    DEBUG_PRINTLN("\n>>> Sending 'B' to Partner");
+    Serial.print('B'); 
+  }
+}
+
+void handleUART() {
+  static unsigned long lastValidRxTime = 0;
+  unsigned long startReadTime = millis();
+  
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == 'A') {
+      if (millis() - lastValidRxTime > 500) {
+        lastValidRxTime = millis();
+        DEBUG_PRINTLN("\n<<< Received 'A' from partner");
+        isPaused = !isPaused;
+        DEBUG_PRINTLN(isPaused ? "Algoritm stopped" : "Algoritm resumed");
+      }
+    }
+    if (millis() - startReadTime > 50) break;
+    yield();
+  }
+}
+
 void setup() {
-  Serial.begin(9600); // rx0 tx0
+  Serial.begin(9600, SERIAL_8E1);
 
   for (int i = 0; i < numLeds; i++) {
     pinMode(ledPins[i], OUTPUT);
     digitalWrite(ledPins[i], LOW);
   }
-  digitalWrite(ledPins[currentLed], HIGH); 
+  digitalWrite(ledPins[currentLed], HIGH);
+
 
   pinMode(buttonPin, INPUT); 
   attachInterrupt(digitalPinToInterrupt(buttonPin), buttonISR, CHANGE);
 
   pinMode(buttonPartnerPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(buttonPartnerPin), buttonPartnerISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(buttonPartnerPin), partnerButtonISR, FALLING);
 
+  DEBUG_PRINTLN("\n Running");
   WiFi.softAP(ap_ssid, ap_password);
-  
+  IPAddress IP = WiFi.softAPIP();
+  DEBUG_PRINTLN("\n--- Wi-Fi Info ---");
+  DEBUG_PRINT("SSID: "); DEBUG_PRINTLN(ap_ssid);
+  DEBUG_PRINT("IP Address: "); DEBUG_PRINTLN(IP);
+  DEBUG_PRINT("MAC Address: "); DEBUG_PRINTLN(WiFi.softAPmacAddress());
+  DEBUG_PRINTLN("------------------\n");
+
   server.on("/", handleRoot);
   server.on("/toggle", handleToggle);
-  server.on("/send", handleSend);
+  server.on("/send", handleSend); 
   server.on("/state", handleGetState);
   server.begin();
+  DEBUG_PRINTLN("Web-server running!");
 }
 
 void loop() {
-  server.handleClient(); 
-
-  if (buttonPartnerFlag) {
-    Serial.print("B"); 
-    buttonPartnerFlag = false;
-  }
-
-  if (Serial.available() > 0) {
-    char c = Serial.read();
-    if (c == 'A') {
-      isPaused = !isPaused;
-    }
-  }
-
+  handleWebClient();       
   processButtonLogic();   
   executeLedAlgorithm();   
+  handlePartnerButton(); 
+  handleUART(); 
 }
